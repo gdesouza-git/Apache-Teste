@@ -1,0 +1,143 @@
+which zypper
+ZYPPER_PKG=$?
+which yum
+YUM_PKG=$?
+which dnf
+DNF_PKG=$?
+which apt-get
+APT_PKG=$?
+which morpheus-node-ctl
+MORPH_PKG=$?
+if [ "$MORPH_PKG" == "0" ]; then
+  /usr/bin/morpheus-node-ctl stop morphd
+fi
+export DEBIAN_FRONTEND=noninteractive
+if [ -f "/proc/sys/crypto/fips_enabled" ] ; then
+FIPS_ENABLED=`cat /proc/sys/crypto/fips_enabled`
+fi
+mkdir -p /etc/morpheus
+cat > /etc/morpheus/morpheus-node.rb << EOL
+package['appliance_url'] = 'https://morpheus-vsphere/'
+package['iface'] = 'vm-003_nic_12_0'
+package['api_token'] = '1de12d13-8287-4504-83a4-8c5c0d5e5e43'
+morphd['verify_peer'] = false
+package['zone'] = "Microsoft Azure Poc"
+package['group'] = "Microsoft Azure Cloud"
+package['public_key'] = 'ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQChTODYc3yGZmkZLtTOdgd2kYQYuO3UIEHWNOyaPD1ufl96PVnVJCdxPy5dhi2Jhw2VDEaRHJBxj86kqaEo7Ile3OnO4NbXdOc/6cEeunfu3vQauZS27xhncMJ+ERwO4dF1dxFp0LYQJ2UjM/d9BsFZ43DRwP4BuuoM/7BflncXzdOqkxL1c8SbxKROPuFKiUYV9v5YDyqP075ZRgnlUeofVdqIkDwh8ECDmXFIOEvHYk+Y2cXyUeDy/2vyEQMESsH2UOgGGVwHDXnK5Glqf31gx1lhIs7DGneOWoL6ejXC3JGBRSQQX1PnhnC8KJb+KTHmsg6zW0Q9/qScbVThdA4F morpheus-Master'
+package['source_ips'] = ['10.122.20.105']
+package['vm_mode'] = true
+
+EOL
+if [ "$ZYPPER_PKG" == "0" ]; then
+  sed -i -r -e 's/^Defaults\s+requiretty/#&/' /etc/sudoers
+  sed -i -r -e 's/^Defaults\s+!visiblepw/#&/' /etc/sudoers
+  cat > /etc/zypp/repos.d/morpheus.repo << EOL
+[morpheus]
+name=Morpheus: Next-Gen Platform as a Service (PaaS) Software
+baseurl=https://morpheus-vsphere/yum/sles/12/\$basearch?ssl_verify=no
+enabled=1
+autorefresh=1
+repo_gpgcheck=0
+pkg_gpgcheck=0
+ssl_verify=no
+type=rpm-md
+gpgkey=https://morpheus-vsphere/yum/pubkey2.gpg
+
+
+EOL
+  curl -ks https://morpheus-vsphere/yum/pubkey2.gpg > /tmp/morpheus.gpg  && rpm --import /tmp/morpheus.gpg && rm -f /tmp/morpheus.gpg
+  if [ "$FIPS_ENABLED" == "1" ]; then
+    zypper install -y morpheus-vm-node-fips
+  else
+    zypper install -y morpheus-vm-node
+  fi
+  /usr/bin/morpheus-node-ctl reconfigure
+  sync
+  if [ "$MORPH_PKG" == "0" ]; then
+    /usr/bin/morpheus-node-ctl restart morphd
+  fi
+elif [ "$YUM_PKG" == "0" ]; then
+  sed -i -r -e 's/^Defaults\s+requiretty/#&/' /etc/sudoers
+  sed -i -r -e 's/^Defaults\s+!visiblepw/#&/' /etc/sudoers
+  cat > /etc/yum.repos.d/morpheus-yum.repo << EOL
+[morpheus]
+name=Morpheus: Next-Gen Platform as a Service (PaaS) Software
+baseurl=https://morpheus-vsphere/yum/el/\$releasever/\$basearch
+enabled=1
+gpgcheck=0
+sslverify=0
+proxy=_none_
+
+
+EOL
+  if grep -q amzn /etc/*-release; then
+    sed -i -r -e 's/yum\/el/yum\/amazon/' /etc/yum.repos.d/morpheus-yum.repo
+  fi
+  if [ "$DNF_PKG" == "0" ]; then
+    sed -i -r -e 's/proxy=_none_//' /etc/yum.repos.d/morpheus-yum.repo
+  fi
+  curl -ks https://morpheus-vsphere/yum/pubkey2.gpg > /tmp/morpheus.gpg  && rpm --import /tmp/morpheus.gpg && rm -f /tmp/morpheus.gpg
+  yum clean all
+  /usr/bin/morpheus-node-ctl graceful-kill morphd
+  yum -y install wget curl
+  if [ "$FIPS_ENABLED" == "1" ]; then
+    yum -y --disablerepo=base,updates,extras,epel install morpheus-vm-node-fips
+  else
+    yum -y --disablerepo=base,updates,extras,epel install morpheus-vm-node
+  fi
+  /usr/bin/morpheus-node-ctl reconfigure
+  sync
+  if [ "$MORPH_PKG" == "0" ]; then
+    /usr/bin/morpheus-node-ctl restart morphd
+  fi
+elif [ "$APT_PKG" == "0" ]; then
+  while fuser /var/lib/apt/lists/lock >/dev/null 2>&1 ; do
+    echo "Waiting for lock /var/lib/apt/lists/lock..."
+    sleep 1
+  done
+  echo "checking for dpkq lock-frontend existence..."
+  lsof /var/lib/dpkg/lock-frontend
+  while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 ; do
+    echo "Waiting for lock /var/lib/dpkg/lock-frontend..."
+    sleep 1
+  done
+  echo "force removing lock /var/lib/dpkg/lock-frontend"
+  rm /var/lib/dpkg/lock-frontend
+  sleep 5
+  dpkg --configure -a
+  export DEBIAN_FRONTEND=noninteractive
+  if [ -f "/etc/debian_version" ]; then
+    apt-get update -y
+    apt-get -y install apt-transport-https
+  fi
+  OS_VERSION=$(grep -e '^VERSION_ID=' /etc/os-release | cut -d "=" -f 2 | tr -d '"')
+  if [ "$OS_VERSION" = "14.04" ]; then
+    echo "deb [trusted=yes] http://morpheus-vsphere/apt morpheus main" > /etc/apt/sources.list.d/morpheus.list
+  else
+    echo "deb [trusted=yes] https://morpheus-vsphere/apt morpheus main" > /etc/apt/sources.list.d/morpheus.list
+    echo 'Acquire::https::morpheus-vsphere::Verify-Peer "false";' > /etc/apt/apt.conf.d/99ssl-exceptions
+    echo 'Acquire::https::morpheus-vsphere::Verify-Host "false";' >> /etc/apt/apt.conf.d/99ssl-exceptions
+  fi
+  echo 'APT::Acquire::Queue-Mode "access";' > /etc/apt/apt.conf.d/99parallel
+  echo 'APT::Acquire::Retries 3;' >> /etc/apt/apt.conf.d/99parallel
+  echo 'Acquire::Languages "none";' >> /etc/apt/apt.conf.d/99parallel
+  echo 'Acquire::https::morpheus-vsphere::Verify-Peer "false";' > /etc/apt/apt.conf.d/99ssl-exceptions
+  echo 'Acquire::https::morpheus-vsphere::Verify-Host "false";' >> /etc/apt/apt.conf.d/99ssl-exceptions
+  /usr/bin/morpheus-node-ctl graceful-kill morphd
+  curl -ks https://morpheus-vsphere/apt/pubkey2.gpg | apt-key add -
+  apt-get update -y
+  apt-get -y install curl debconf-utils
+  if [ "$FIPS_ENABLED" == "1" ]; then
+  apt-get --allow-unauthenticated install morpheus-vm-node-fips
+  else
+  apt-get --allow-unauthenticated install morpheus-vm-node
+  fi
+  /usr/bin/morpheus-node-ctl reconfigure
+  sync
+  if [ "$MORPH_PKG" == "0" ]; then
+    /usr/bin/morpheus-node-ctl restart morphd
+  fi
+else
+  echo "This Linux Distribution is not supported for Morpheus Agent Install. Must use YUM or Apt Package Manager"
+  exit 1
+fi
